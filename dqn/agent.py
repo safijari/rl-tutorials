@@ -11,6 +11,7 @@ from typing import Any
 from random import sample, random
 import wandb
 from collections import deque
+import argh
 
 
 @dataclass
@@ -36,32 +37,37 @@ class DQNAgent:
 
 
 class Model(nn.Module):
-    def __init__(self, obs_shape, num_actions):
+    def __init__(self, obs_shape, num_actions, lr=0.001):
         super(Model, self).__init__()
         assert len(obs_shape) == 1, "This network only works for flat observations"
         self.obs_shape = obs_shape
         self.num_actions = num_actions
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(obs_shape[0], 256),
+            torch.nn.Linear(obs_shape[0], 128),
             torch.nn.ReLU(),
-            torch.nn.Linear(256, num_actions),
+            torch.nn.Linear(128, num_actions),
         )
-        self.opt = optim.Adam(self.net.parameters(), lr=0.0001)
+        self.opt = optim.Adam(self.net.parameters(), lr=lr)
 
     def forward(self, x):
         return self.net(x)
 
+
 class ReplayBuffer:
     def __init__(self, buffer_size=100000):
         self.buffer_size = buffer_size
-        self.buffer = deque(maxlen=buffer_size)
+        self.buffer = [None]*buffer_size
+        self.idx = 0
 
     def insert(self, sars):
-        self.buffer.append(sars)
-        # self.buffer = self.buffer[-self.buffer_size:]
+        self.buffer[self.idx % self.buffer_size] = sars
+        self.idx += 1
 
     def sample(self, num_samples):
-        assert num_samples <= len(self.buffer)
+        assert num_samples < min(self.idx, self.buffer_size)
+        # if num_samples > min(self.idx, self.buffer_size):
+        if self.idx < self.buffer_size:
+            return sample(self.buffer[:self.idx], num_samples)
         return sample(self.buffer, num_samples)
 
 
@@ -69,11 +75,18 @@ def update_tgt_model(m, tgt):
     tgt.load_state_dict(m.state_dict())
 
 
-def train_step(model, state_transitions, tgt, num_actions):
-    cur_states = torch.stack(([torch.Tensor(s.state) for s in state_transitions]))
-    rewards = torch.stack(([torch.Tensor([s.reward]) for s in state_transitions]))
-    mask = torch.stack(([torch.Tensor([0]) if s.done else torch.Tensor([1]) for s in state_transitions]))
-    next_states = torch.stack(([torch.Tensor(s.next_state) for s in state_transitions]))
+def train_step(model, state_transitions, tgt, num_actions, device, gamma=0.99):
+    cur_states = torch.stack(([torch.Tensor(s.state) for s in state_transitions])).to(device)
+    rewards = torch.stack(([torch.Tensor([s.reward]) for s in state_transitions])).to(device)
+    mask = torch.stack(
+        (
+            [
+                torch.Tensor([0]) if s.done else torch.Tensor([1])
+                for s in state_transitions
+            ]
+        )
+    ).to(device)
+    next_states = torch.stack(([torch.Tensor(s.next_state) for s in state_transitions])).to(device)
     actions = [s.action for s in state_transitions]
 
     with torch.no_grad():
@@ -81,34 +94,40 @@ def train_step(model, state_transitions, tgt, num_actions):
 
     model.opt.zero_grad()
     qvals = model(cur_states)  # (N, num_actions)
-    one_hot_actions = F.one_hot(torch.LongTensor(actions), num_actions)
+    one_hot_actions = F.one_hot(torch.LongTensor(actions), num_actions).to(device)
 
-    loss = ((rewards + mask[:, 0]*qvals_next - torch.sum(qvals*one_hot_actions, -1))**2).mean()
+    loss = (
+        (rewards + mask[:, 0] * qvals_next * 0.99 - torch.sum(qvals * one_hot_actions, -1))
+        ** 2
+    ).mean()
     loss.backward()
     model.opt.step()
     return loss
 
-def main(test=False, chkpt=None):
+
+def main(name, test=False, chkpt=None, device='cuda'):
     if not test:
-        wandb.init(project="dqn-tutorial", name="dqn-cartpole")
-    min_rb_size = 10000
-    sample_size = 2500
+        wandb.init(project="dqn-tutorial", name=name)
+    memory_size = 50000
+    min_rb_size = 20000
+    sample_size = 100
+    lr = 0.0001
 
     # eps_max = 1.0
     eps_min = 0.01
 
-    eps_decay = 0.999999
+    eps_decay = 0.999995
 
-    env_steps_before_train = 100
-    tgt_model_update = 500
+    env_steps_before_train = 5
+    tgt_model_update = 1000
 
     env = gym.make("CartPole-v1")
     last_observation = env.reset()
 
-    m = Model(env.observation_space.shape, env.action_space.n)
+    m = Model(env.observation_space.shape, env.action_space.n, lr=lr).to(device)
     if chkpt is not None:
         m.load_state_dict(torch.load(chkpt))
-    tgt = Model(env.observation_space.shape, env.action_space.n)
+    tgt = Model(env.observation_space.shape, env.action_space.n).to(device)
     update_tgt_model(m, tgt)
 
     rb = ReplayBuffer()
@@ -128,19 +147,21 @@ def main(test=False, chkpt=None):
                 time.sleep(0.05)
             tq.update(1)
 
-            eps = eps_decay**(step_num)
+            eps = eps_decay ** (step_num)
             if test:
                 eps = 0
 
             if random() < eps:
-                action = env.action_space.sample()  # your agent here (this takes random actions)
+                action = (
+                    env.action_space.sample()
+                )  # your agent here (this takes random actions)
             else:
-                action = m(torch.Tensor(last_observation)).max(-1)[-1].item()
+                action = m(torch.Tensor(last_observation).to(device)).max(-1)[-1].item()
 
             observation, reward, done, info = env.step(action)
             rolling_reward += reward
 
-            reward = reward
+            reward = reward * 0.1
 
             rb.insert(Sarsd(last_observation, action, reward, observation, done))
 
@@ -156,9 +177,20 @@ def main(test=False, chkpt=None):
             steps_since_train += 1
             step_num += 1
 
-            if (not test) and len(rb.buffer) > min_rb_size and steps_since_train > env_steps_before_train:
-                loss = train_step(m, rb.sample(sample_size), tgt, env.action_space.n)
-                wandb.log({'loss': loss.detach().item(), 'eps': eps, 'avg_reward': np.mean(episode_rewards)}, step=step_num)
+            if (
+                (not test)
+                and rb.idx > min_rb_size
+                and steps_since_train > env_steps_before_train
+            ):
+                loss = train_step(m, rb.sample(sample_size), tgt, env.action_space.n, device)
+                wandb.log(
+                    {
+                        "loss": loss.detach().cpu().item(),
+                        "eps": eps,
+                        "avg_reward": np.mean(episode_rewards),
+                    },
+                    step=step_num,
+                )
                 episode_rewards = []
                 epochs_since_tgt += 1
                 if epochs_since_tgt > tgt_model_update:
@@ -174,6 +206,6 @@ def main(test=False, chkpt=None):
 
     env.close()
 
-if __name__ == '__main__':
-    # main()
-    main(True, "models/1315526.pth")
+
+if __name__ == "__main__":
+    argh.dispatch_command(main)
