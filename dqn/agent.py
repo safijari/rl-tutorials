@@ -111,14 +111,15 @@ def main(name, test=False, chkpt=None, device='cuda'):
     memory_size = 50000
     min_rb_size = 20000
     sample_size = 100
-    lr = 0.0001
+    lr = 0.001
 
     # eps_max = 1.0
-    eps_min = 0.01
+    eps_min = 0.05
 
-    eps_decay = 0.999995
+    # eps_decay = 0.999995
+    eps_decay = 0.99995
 
-    env_steps_before_train = 5
+    env_steps_before_train = 10
     tgt_model_update = 1000
 
     env = gym.make("CartPole-v1")
