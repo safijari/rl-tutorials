@@ -12,6 +12,7 @@ from random import sample, random
 import wandb
 from collections import deque
 import argh
+import moviepy.editor as ed
 
 
 @dataclass
@@ -21,19 +22,6 @@ class Sarsd:
     reward: float
     next_state: Any
     done: bool
-
-
-class DQNAgent:
-    def __init__(self, model):
-        self.model = model
-
-    def get_actions(self, observations):
-        # observations shape is (N, 4)
-        q_vals = self.model(observations)
-
-        # q_vals shape (N, 2)
-
-        return q_vals.max(-1)[1]
 
 
 class Model(nn.Module):
@@ -105,24 +93,55 @@ def train_step(model, state_transitions, tgt, num_actions, device, gamma=0.99):
     return loss
 
 
+def run_test_make_movie(model, env, device, framerate=25, path=''):
+    last_observation = env.reset()
+    last_frame = env.render(mode='rgb_array')
+    frames = []
+
+    done = False
+    reward = 0
+
+    while not done:
+        frames.append(ed.ImageClip(last_frame).set_duration(1.0/framerate))
+        action = model(torch.Tensor(last_observation).to(device)).max(-1)[-1].item()
+        last_observation, r, done, _ = env.step(action)
+
+        reward += r
+
+        last_frame = env.render(mode='rgb_array')
+
+    if path:
+        concat_clip = ed.concatenate_videoclips(frames, method='compose')
+        concat_clip.write_videofile(path, fps=framerate)
+
+    return reward
+
+
 def main(name, test=False, chkpt=None, device='cuda'):
-    if not test:
-        wandb.init(project="dqn-tutorial", name=name)
     memory_size = 50000
     min_rb_size = 20000
     sample_size = 100
-    lr = 0.001
+    lr = 0.0001
 
-    # eps_max = 1.0
     eps_min = 0.05
 
     # eps_decay = 0.999995
-    eps_decay = 0.99995
+    eps_decay = 0.99999
 
     env_steps_before_train = 10
-    tgt_model_update = 1000
+    tgt_model_update = 5000
+
+    if not test:
+        wandb.init(project="dqn-tutorial", name=name,
+                   config={'sample_size': sample_size,
+                           'learning_rate': lr,
+                           'minimum_epsilon': eps_min,
+                           'epsilon_decay_factor': eps_decay,
+                           'env_steps_before_train': env_steps_before_train,
+                           'epochs_before_target_model_update': tgt_model_update})
 
     env = gym.make("CartPole-v1")
+    test_env = gym.make("CartPole-v1")
     last_observation = env.reset()
 
     m = Model(env.observation_space.shape, env.action_space.n, lr=lr).to(device)
@@ -199,6 +218,10 @@ def main(name, test=False, chkpt=None, device='cuda'):
                     update_tgt_model(m, tgt)
                     epochs_since_tgt = 0
                     torch.save(tgt.state_dict(), f"models/{step_num}.pth")
+                    path = f"/tmp/{step_num}.mp4"
+                    test_rew = run_test_make_movie(m, test_env, device, path=path)
+                    wandb.log({"test_reward": test_rew,
+                               "test_video": wandb.Video(path, caption=str(test_rew))}, step=step_num)
 
                 steps_since_train = 0
 
