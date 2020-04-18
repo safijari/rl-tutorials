@@ -117,7 +117,8 @@ def run_test_make_movie(model, env, device, framerate=25, path=''):
     return reward
 
 
-def main(name, test=False, chkpt=None, device='cuda'):
+def main(name,
+         test=False, chkpt=None, device='cuda'):
     memory_size = 50000
     min_rb_size = 20000
     sample_size = 100
@@ -139,6 +140,12 @@ def main(name, test=False, chkpt=None, device='cuda'):
                            'epsilon_decay_factor': eps_decay,
                            'env_steps_before_train': env_steps_before_train,
                            'epochs_before_target_model_update': tgt_model_update})
+        cfg = wandb.config
+
+        lr = cfg.learning_rate
+        eps_decay = cfg.epsilon_decay_factor
+        tgt_model_update = cfg.epochs_before_target_model_update
+        eps_min = cfg.minimum_epsilon
 
     env = gym.make("CartPole-v1")
     test_env = gym.make("CartPole-v1")
@@ -162,6 +169,8 @@ def main(name, test=False, chkpt=None, device='cuda'):
     tq = tqdm()
     try:
         while True:
+            if step_num > 1500000:
+                break
             if test:
                 env.render()
                 time.sleep(0.05)
