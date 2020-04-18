@@ -1,2 +1,3 @@
 dqn/models/*
 dqn/wandb/*
+__pycache__/
